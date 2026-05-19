@@ -10,7 +10,7 @@ from .cache import FrameCache
 
 from .processing.restore import restore_frame
 from .processing.preview import restore_preview
-from .processing.mask import auto_detect_mask, load_preset_mask
+from .processing.mask import load_preset_mask
 
 class App(QWidget):
     def __init__(self):
@@ -19,7 +19,8 @@ class App(QWidget):
         self.files = []
         self.idx = 0
         self.cache = FrameCache()
-        self.auto_mask = None
+        self.preset_mask = None
+        self.preset_mask_path = None
         self.flow_cache = {}
 
         self.p = {"dust":0.03, "scratch":1.5}
@@ -78,20 +79,23 @@ class App(QWidget):
         
         # ===== ACTION BUTTONS =====
         buttons = QHBoxLayout()
+        
         load = QPushButton("Load")
         load_mask = QPushButton("Load Mask")
         process = QPushButton("Process")
         cancel = QPushButton("Cancel")
         
         buttons.addWidget(load)
-        load_mask.clicked.connect(self.load_mask)
+        buttons.addWidget(load_mask)
         buttons.addWidget(process)
         buttons.addWidget(cancel)
         
         load.clicked.connect(self.load)
-        buttons.addWidget(load_mask)
+        load_mask.clicked.connect(self.load_mask)
         process.clicked.connect(self.process)
         cancel.clicked.connect(self.cancel)
+                
+
         
         # ===== PROGRESS + STATUS =====
         self.progress = QProgressBar()
@@ -151,13 +155,21 @@ class App(QWidget):
 
         self.files = sorted(glob.glob(os.path.join(folder, "*.exr")))
         self.idx = 0
+        
+        
+        # Important: no automatic mask generation.
+        self.preset_mask = None
+        self.preset_mask_path = None
 
         img = self.get_frame(self.idx)
         if img is not None:
-            self.auto_mask = auto_detect_mask(img)
+            self.v1.set_image(img)
+            self.v2.set_image(img)
+            
+        if hasattr(self, "status"):
+            self.status.setText("Sequence loaded. Please load a preset mask before preview/process.")
 
-        self.update_view()
-
+     
     def load_mask(self):
        if not self.files:
            QMessageBox.warning(
@@ -180,7 +192,8 @@ class App(QWidget):
        frame = self.get_frame(self.idx)
     #
        try:
-           self.auto_mask = load_preset_mask(path, frame.shape)
+           self.preset_mask = load_preset_mask(path, frame.shape)
+           self.preset_mask_path = path
        except Exception as e:
            QMessageBox.critical(
                self,
@@ -211,10 +224,19 @@ class App(QWidget):
 
         c = self.get_frame(self.idx)
 
+        if self.preset_mask is None:
+            self.v1.set_image(c)
+            self.v2.set_image(c)
+        
+            if hasattr(self, "status"):
+                self.status.setText("Load a preset mask before previewing restoration.")
+        
+            return
+        
         out, mask = restore_preview(c, self.p)
-
-        if self.auto_mask is not None:
-            mask *= self.auto_mask
+        
+        mask *= self.preset_mask
+        out = c * (1.0 - self.preset_mask[..., None]) + out * self.preset_mask[..., None]
 
         left = c.copy()
         if self.overlay.isChecked():
@@ -257,6 +279,15 @@ class App(QWidget):
         if not self.files:
             return
     
+        if self.preset_mask is None:
+            QMessageBox.warning(
+                self,
+                "No preset mask loaded",
+                "Load a black/white preset mask before processing."
+            )
+            return
+        
+        
         print("Process Started")
     
         self.cancel_flag = False
@@ -308,9 +339,13 @@ class App(QWidget):
                   # restore
                 out, mask = restore_frame(frames, self.p, i, self.flow_cache)
     
-                # apply auto mask if present
-                if getattr(self, "auto_mask", None) is not None:
-                    out *= self.auto_mask[..., None]
+                # Apply required preset mask.
+                # Inside white mask: restored output.
+                # Outside black mask: original center frame.
+                center = frames[len(frames) // 2]
+                
+                out = center * (1.0 - self.preset_mask[..., None]) + out * self.preset_mask[..., None]
+                mask *= self.preset_mask
         
                 # 👇 build output path
                 name = os.path.basename(self.files[i])
