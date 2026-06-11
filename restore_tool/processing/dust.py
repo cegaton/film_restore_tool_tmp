@@ -1,5 +1,5 @@
 """
-dust_ac_v1.py
+dust_ac_v2_large_specks.py
 
 Conservative dust/speck detector for the AC restoration pipeline.
 
@@ -288,6 +288,40 @@ def detect_dust(
 
     dust = _component_filter(candidate, response, valid, scratch, p)
 
-    # Keep API compatible with older restore.py: second mask reserved for larger blobs.
+    # Larger isolated specks/blobs: use a separate component pass with larger
+    # allowed size and slightly different thresholds. This catches the big white
+    # dust spots that the compact-dust filter rejects by max_area/max_width.
     large_dust = np.zeros_like(dust, dtype=bool)
-    return dust.astype(bool), large_dust
+    if bool(p.get("enable_large_dust_repair", True)):
+        large_abs = float(p.get("large_dust_abs", max(0.018, dust_abs * 0.75)))
+        large_noise_mul = float(p.get("large_dust_noise_mul", max(1.2, noise_mul * 0.55)))
+
+        large_candidate = np.zeros((h, w), dtype=bool)
+        if bool(p.get("dust_detect_bright", True)):
+            large_candidate |= bright_resp > np.maximum(large_abs, large_noise_mul * noise)
+        if bool(p.get("dust_detect_dark", False)):
+            large_candidate |= dark_resp > np.maximum(float(p.get("large_dust_dark_abs", large_abs)), large_noise_mul * noise)
+
+        if bool(p.get("large_dust_use_temporal", True)):
+            large_candidate &= temporal_gate
+
+        large_candidate &= valid
+        large_candidate &= ~scratch
+        large_candidate &= ~dust
+
+        lp = dict(p)
+        lp["dust_min_area"] = int(p.get("large_dust_min_area", 18))
+        lp["dust_max_area"] = int(p.get("large_dust_max_area", 9000))
+        lp["dust_max_width"] = int(p.get("large_dust_max_width", 160))
+        lp["dust_max_height"] = int(p.get("large_dust_max_height", 160))
+        lp["dust_max_aspect"] = float(p.get("large_dust_max_aspect", 4.0))
+        lp["dust_min_fill_ratio"] = float(p.get("large_dust_min_fill_ratio", 0.08))
+        lp["dust_min_peak_response"] = float(p.get("large_dust_min_peak_response", 0.018))
+        lp["dust_min_mean_response"] = float(p.get("large_dust_min_mean_response", 0.0045))
+        lp["dust_close_size"] = int(p.get("large_dust_close_size", 5))
+        lp["dust_dilate"] = int(p.get("large_dust_dilate", 3))
+        lp["dust_max_mask_fraction"] = float(p.get("large_dust_max_mask_fraction", 0.0030))
+
+        large_dust = _component_filter(large_candidate, response, valid, scratch | dust, lp)
+
+    return dust.astype(bool), large_dust.astype(bool)
